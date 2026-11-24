@@ -1,0 +1,18 @@
+services:
+  disk-repair:
+    build: .
+    image: disk-repair:latest
+    container_name: disk-repair
+    ports:
+      - "8000:8000"
+    environment:
+      DATA_DIR: /data
+      IMAGE_SIZE_MIB: "8"          # 样例盘大小（仅首次生成时生效）
+      LEASE_TTL_SECONDS: "60"      # 默认租约 TTL
+      # DEMO_DAMAGE: "64:8,512:16,1500:4"  # 出厂"损坏"区间（仅首次生成时生效）
+    volumes:
+      - repair-data:/data
+    restart: unless-stopped
+
+volumes:
+  repair-data:

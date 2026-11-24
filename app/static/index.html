@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>虚拟机系统盘分段修复台</title>
+<style>
+  :root { --ok:#137333; --err:#b3261e; --muted:#5f6368; --line:#dadce0; --bg:#f8f9fa; }
+  * { box-sizing: border-box; }
+  body { font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+         margin: 0 auto; max-width: 1080px; padding: 16px 24px 64px; color: #202124; }
+  h1 { font-size: 22px; } h2 { font-size: 16px; margin: 0 0 10px; }
+  section { background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
+            padding: 14px 16px; margin-top: 16px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { border-bottom: 1px solid var(--line); padding: 6px 8px; text-align: left; }
+  th { color: var(--muted); font-weight: 600; }
+  button { background: #1a73e8; color: #fff; border: 0; border-radius: 6px;
+           padding: 6px 14px; cursor: pointer; font-size: 13px; }
+  button:disabled { background: #9e9e9e; cursor: not-allowed; }
+  button.ghost { background: #fff; color: #1a73e8; border: 1px solid #1a73e8; }
+  input[type=number], input[type=text] { width: 90px; padding: 5px 8px;
+           border: 1px solid var(--line); border-radius: 6px; font-size: 13px; }
+  input.wide { width: 130px; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .muted { color: var(--muted); font-size: 12px; }
+  .ok { color: var(--ok); } .err { color: var(--err); }
+  .card { background: #fff; border: 1px solid var(--line); border-radius: 8px;
+          padding: 10px 12px; margin-top: 10px; }
+  .card .head { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  progress { width: 260px; height: 12px; }
+  pre { background: #111; color: #c8e6c9; padding: 10px; border-radius: 8px;
+        overflow: auto; max-height: 320px; font-size: 12px; line-height: 1.35; }
+  #log { max-height: 200px; }
+  code { background: #eef; padding: 1px 5px; border-radius: 4px; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; }
+  .st-active { background: #e6f4ea; color: var(--ok); }
+  .st-committed { background: #e8f0fe; color: #1a73e8; }
+  .st-expired, .st-released, .st-failed { background: #fce8e6; color: var(--err); }
+</style>
+</head>
+<body>
+<h1>🛠️ 虚拟机系统盘分段修复台</h1>
+
+<section>
+  <h2>磁盘信息</h2>
+  <div id="info" class="row">加载中…</div>
+  <div class="row" style="margin-top:8px">
+    <button onclick="downloadImage()">⬇️ 下载 Raw 镜像</button>
+    <span class="muted">按段修复，无需复制整盘；下载为流式读取当前镜像。</span>
+  </div>
+</section>
+
+<section>
+  <h2>① 服务器上的备份段（样例盘出厂自带 3 段"待回填"区间）</h2>
+  <div class="row">
+    <label>租约 TTL <input type="number" id="ttl" value="60" min="1" max="3600"> 秒</label>
+    <label>慢速上传 <input type="number" id="delay" value="0" min="0" max="2000"> ms / 64 KiB</label>
+    <span class="muted">把延时调到 200~500ms 再点"领取并回填"，上传期间可对另一段重复操作，即交错回填。</span>
+  </div>
+  <table id="backupTable">
+    <thead><tr><th>备份文件</th><th>起始块</th><th>块数</th><th>字节数</th><th>操作</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<section>
+  <h2>② 手动领取租约</h2>
+  <div class="row">
+    <label>起始块 <input type="number" id="mStart" min="0" value="100"></label>
+    <label>块数 <input type="number" id="mCount" min="1" value="2"></label>
+    <label>TTL 秒 <input type="number" id="mTtl" min="1" max="3600" value="60"></label>
+    <button onclick="claimManual()">领取</button>
+    <span class="muted">有效租约区间不可重叠；到期自动释放，可重新领取。</span>
+  </div>
+</section>
+
+<section>
+  <h2>③ 我的租约</h2>
+  <div id="cards"><span class="muted">暂无。先在①或②领取租约。</span></div>
+</section>
+
+<section>
+  <h2>④ 按块回读镜像</h2>
+  <div class="row">
+    <label>块号 <input type="number" id="rbIndex" min="0" value="64"></label>
+    <button class="ghost" onclick="readBlock()">读取 4 KiB</button>
+    <span class="muted">损坏区间显示为 <code>ee ee …</code>，回填后应显示 <code>VMDISK-BLOCK-…</code>。</span>
+  </div>
+  <pre id="rbOut">（尚未读取）</pre>
+</section>
+
+<section>
+  <h2>⑤ 全部租约（每 2 秒自动刷新）</h2>
+  <table id="leaseTable">
+    <thead><tr><th>租约</th><th>区间 [起, 止)</th><th>状态</th><th>剩余秒</th><th>过期时间</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<section>
+  <h2>日志</h2>
+  <pre id="log"></pre>
+</section>
+
+<script>
+const $ = id => document.getElementById(id);
+const cards = new Map();  // leaseId -> {progress, status, countdown, expiresAt}
+
+function log(msg) {
+  const t = new Date().toLocaleTimeString('zh-CN', {hour12: false});
+  $('log').textContent = `[${t}] ${msg}\n` + $('log').textContent;
+}
+
+async function apiJson(method, url, body) {
+  const opt = {method, headers: {}};
+  if (body !== undefined) {
+    opt.headers['Content-Type'] = 'application/json';
+    opt.body = JSON.stringify(body);
+  }
+  const r = await fetch(url, opt);
+  let data = null;
+  try { data = await r.json(); } catch (e) { /* 非 JSON */ }
+  return {status: r.status, ok: r.ok, data};
+}
+
+const detail = res => (res.data && res.data.detail) ? res.data.detail : `HTTP ${res.status}`;
+
+// ---------- 信息 ----------
+
+async function refreshInfo() {
+  const r = await apiJson('GET', '/api/info');
+  if (!r.ok) { $('info').textContent = '获取失败'; return; }
+  const d = r.data;
+  $('info').innerHTML =
+    `镜像 <code>${d.image_path}</code> · 大小 <b>${(d.image_size_bytes/1048576).toFixed(1)} MiB</b>` +
+    ` · 共 <b>${d.total_blocks}</b> 块 · 块大小 <b>${d.block_size}</b> 字节` +
+    ` · 默认 TTL <b>${d.default_lease_ttl_seconds}</b> s` +
+    (d.recovered_journals ? ` · <span class="err">启动时恢复了 ${d.recovered_journals} 个未完成提交</span>` : '');
+}
+
+// ---------- 备份段 ----------
+
+async function refreshBackups() {
+  const r = await apiJson('GET', '/api/backups');
+  const tb = $('backupTable').querySelector('tbody');
+  tb.innerHTML = '';
+  for (const b of (r.data ? r.data.backups : [])) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td><code>${b.file}</code></td><td>${b.start_block}</td>` +
+                   `<td>${b.block_count}</td><td>${b.bytes}</td><td></td>`;
+    const btn = document.createElement('button');
+    btn.textContent = '领取并回填';
+    btn.onclick = () => claimAndFill(b, btn);
+    tr.lastElementChild.appendChild(btn);
+    tb.appendChild(tr);
+  }
+}
+
+async function claimAndFill(entry, btn) {
+  btn.disabled = true;
+  try {
+    const ttl = parseFloat($('ttl').value) || 60;
+    const r = await apiJson('POST', '/api/leases',
+      {start_block: entry.start_block, block_count: entry.block_count, ttl_seconds: ttl});
+    if (!r.ok) { log(`领取 [${entry.start_block}, ${entry.start_block + entry.block_count}) 失败：${detail(r)}`); return; }
+    const lease = r.data;
+    log(`已领取租约 ${lease.id.slice(0,8)} 区间 [${lease.start_block}, ${lease.end_block})，TTL ${ttl}s`);
+    const blob = await (await fetch(`/api/backups/${entry.file}`)).blob();
+    const card = makeCard(lease, `服务器备份 ${entry.file}`);
+    const delay = parseFloat($('delay').value) || 0;
+    const res = await uploadBlob(lease.id, blob, delay, p => { card.progress.value = p; });
+    handleUploadResult(card, lease, res);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ---------- 手动领取 ----------
+
+async function claimManual() {
+  const body = {
+    start_block: parseInt($('mStart').value, 10),
+    block_count: parseInt($('mCount').value, 10),
+    ttl_seconds: parseFloat($('mTtl').value) || 60,
+  };
+  const r = await apiJson('POST', '/api/leases', body);
+  if (!r.ok) { log(`领取失败：${detail(r)}`); return; }
+  log(`已领取租约 ${r.data.id.slice(0,8)} 区间 [${r.data.start_block}, ${r.data.end_block})`);
+  makeCard(r.data, null);
+}
+
+// ---------- 租约卡片 ----------
+
+function makeCard(lease, presetLabel) {
+  if ($('cards').querySelector('.muted')) $('cards').innerHTML = '';
+  const el = document.createElement('div');
+  el.className = 'card';
+  el.innerHTML = `
+    <div class="head">
+      <span>租约 <code>${lease.id.slice(0,8)}</code> · 区间 <b>[${lease.start_block}, ${lease.end_block})</b>
+      · ${lease.byte_length} 字节</span>
+      <span>剩余 <b class="cd"></b> s</span>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <span class="muted">${presetLabel || '选择本地备份文件：'}</span>
+      <input type="file" ${presetLabel ? 'style="display:none"' : ''}>
+      <progress value="0" max="1"></progress>
+      <button class="up">上传并提交</button>
+      <span class="st muted">待上传</span>
+    </div>`;
+  $('cards').appendChild(el);
+  const card = {
+    el,
+    progress: el.querySelector('progress'),
+    status: el.querySelector('.st'),
+    countdown: el.querySelector('.cd'),
+    expiresAt: lease.expires_at,
+    fileInput: el.querySelector('input[type=file]'),
+  };
+  cards.set(lease.id, card);
+  const upBtn = el.querySelector('.up');
+  if (presetLabel) upBtn.style.display = 'none';  // 备份段流程自动上传
+  upBtn.onclick = async () => {
+    const f = card.fileInput.files[0];
+    if (!f) { log('请先选择备份文件'); return; }
+    if (f.size !== lease.byte_length) {
+      log(`文件大小 ${f.size} 与区间长度 ${lease.byte_length} 不一致，拒绝上传`);
+      card.status.textContent = `❌ 长度不符（${f.size} ≠ ${lease.byte_length}）`;
+      card.status.className = 'st err';
+      return;
+    }
+    upBtn.disabled = true;
+    const delay = parseFloat($('delay').value) || 0;
+    const res = await uploadBlob(lease.id, f, delay, p => { card.progress.value = p; });
+    handleUploadResult(card, lease, res);
+  };
+  return card;
+}
+
+function handleUploadResult(card, lease, res) {
+  if (res.status === 200) {
+    card.status.textContent = '✅ 已提交，整段生效';
+    card.status.className = 'st ok';
+    log(`租约 ${lease.id.slice(0,8)} 提交成功：[${lease.start_block}, ${lease.end_block}) 已回填`);
+  } else {
+    const msg = res.data && res.data.detail ? res.data.detail : `HTTP ${res.status}`;
+    card.status.textContent = `❌ ${msg}`;
+    card.status.className = 'st err';
+    log(`租约 ${lease.id.slice(0,8)} 提交被拒绝 [${res.status}] ${msg}`);
+  }
+  refreshLeases();
+}
+
+// ---------- 上传（支持慢速流式，演示交错回填） ----------
+
+async function uploadBlob(leaseId, blob, delayMs, onProgress) {
+  const url = `/api/leases/${leaseId}/data`;
+  if (delayMs > 0) {
+    try {
+      const CHUNK = 64 * 1024;
+      let sent = 0;
+      const stream = new ReadableStream({
+        async pull(c) {
+          if (sent >= blob.size) { c.close(); return; }
+          const end = Math.min(sent + CHUNK, blob.size);
+          c.enqueue(new Uint8Array(await blob.slice(sent, end).arrayBuffer()));
+          sent = end;
+          onProgress(sent / blob.size);
+          await new Promise(r => setTimeout(r, delayMs));
+        }
+      });
+      const resp = await fetch(url, {method: 'PUT', body: stream, duplex: 'half'});
+      return {status: resp.status, data: await resp.json().catch(() => null)};
+    } catch (e) {
+      log('流式上传不可用，退回普通上传：' + e);
+    }
+  }
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', url);
+    xhr.upload.onprogress = e => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+    xhr.onload = () => {
+      let d = null;
+      try { d = JSON.parse(xhr.responseText); } catch (e) {}
+      resolve({status: xhr.status, data: d});
+    };
+    xhr.onerror = () => reject(new Error('网络错误'));
+    xhr.send(blob);
+  });
+}
+
+// ---------- 按块回读 ----------
+
+function hexDump(buf) {
+  const b = new Uint8Array(buf);
+  const lines = [];
+  for (let off = 0; off < b.length; off += 16) {
+    const slice = b.slice(off, off + 16);
+    const hex = Array.from(slice).map(x => x.toString(16).padStart(2, '0')).join(' ');
+    const asc = Array.from(slice).map(x => (x >= 32 && x < 127) ? String.fromCharCode(x) : '.').join('');
+    lines.push(off.toString(16).padStart(8, '0') + '  ' + hex.padEnd(47) + '  ' + asc);
+  }
+  return lines.join('\n');
+}
+
+async function readBlock() {
+  const idx = parseInt($('rbIndex').value, 10);
+  const r = await fetch(`/api/image/blocks/${idx}`);
+  if (!r.ok) {
+    const d = await r.json().catch(() => null);
+    $('rbOut').textContent = `读取失败：${d && d.detail ? d.detail : r.status}`;
+    return;
+  }
+  const buf = await r.arrayBuffer();
+  $('rbOut').textContent = `块 ${idx}（${buf.byteLength} 字节）\n` + hexDump(buf);
+}
+
+// ---------- 租约列表 ----------
+
+const ST_NAME = {active: '有效', committed: '已提交', expired: '已过期', released: '已释放', failed: '失败'};
+
+async function refreshLeases() {
+  const r = await apiJson('GET', '/api/leases');
+  if (!r.ok) return;
+  const tb = $('leaseTable').querySelector('tbody');
+  tb.innerHTML = '';
+  for (const l of r.data.leases) {
+    const tr = document.createElement('tr');
+    const exp = new Date(l.expires_at * 1000).toLocaleTimeString('zh-CN', {hour12: false});
+    tr.innerHTML = `<td><code>${l.id.slice(0,8)}</code></td>` +
+      `<td>[${l.start_block}, ${l.end_block})</td>` +
+      `<td><span class="pill st-${l.state}">${ST_NAME[l.state] || l.state}</span></td>` +
+      `<td>${l.seconds_remaining.toFixed(1)}</td><td>${exp}</td>`;
+    tb.appendChild(tr);
+  }
+}
+
+// 卡片倒计时
+setInterval(() => {
+  const now = Date.now() / 1000;
+  for (const c of cards.values()) {
+    const left = Math.max(0, c.expiresAt - now);
+    c.countdown.textContent = left.toFixed(0);
+    c.countdown.style.color = left < 10 ? 'var(--err)' : 'inherit';
+  }
+}, 500);
+setInterval(refreshLeases, 2000);
+
+function downloadImage() { window.location = '/api/image/download'; }
+
+refreshInfo();
+refreshBackups();
+refreshLeases();
+</script>
+</body>
+</html>
