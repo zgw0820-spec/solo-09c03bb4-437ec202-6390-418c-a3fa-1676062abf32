@@ -7,6 +7,7 @@
   C. 过期拒绝：上传先开传、提交时已过期 -> 410，随后可重领并成功
   D. 传输中断：上传中途断连，该段原字节保持不变
   E. 整盘下载：修复后下载 Raw 镜像，抽查回填结果
+  F. 按块跳过：对已回填区间再传一次相同备份，改写 0 块、全部跳过
 
 用法：python3 tests/interleaved_demo.py [BASE_URL]   （默认 http://127.0.0.1:8000）
 仅用标准库，退出码非 0 表示有失败项。
@@ -119,6 +120,14 @@ def main() -> int:
     t.join(timeout=30)
     check("A 慢速上传最终提交成功", res_a.get("status") == 200,
           f"HTTP {res_a.get('status')}")
+    stats_a = json.loads(res_a["body"]) if res_a.get("body") else {}
+    # 不假设写块数（同一数据盘重复演练时 A 段可能已被修复 -> 0 改写全跳过），
+    # 只校验统计字段齐全且算术自洽
+    check("A 响应含按块统计",
+          stats_a.get("blocks_compared") == b1["block_count"]
+          and stats_a.get("blocks_written", -1) >= 0
+          and stats_a.get("blocks_written") + stats_a.get("blocks_skipped") == b1["block_count"],
+          f"写 {stats_a.get('blocks_written')} / 跳 {stats_a.get('blocks_skipped')}")
 
     _, blk = req("GET", f"/api/image/blocks/{b1['start_block']}")
     check("A 区间首块 == 备份数据", blk == data1[:4096])
@@ -160,7 +169,8 @@ def main() -> int:
     s, _ = req("PUT", f"/api/leases/{lease_e2['id']}/data", b"\x55" * 8192)
     check("重领后提交成功", s == 200)
     _, blk_after = req("GET", "/api/image/blocks/1810")
-    check("重领提交后数据生效", blk_after == b"\x55" * 4096 and blk_after != blk_before)
+    # 直接断言目标字节生效（不依赖运行前状态，使脚本可在同一数据盘上重复执行）
+    check("重领提交后数据生效", blk_after == b"\x55" * 4096)
 
     print("\n== D. 传输中断保留原字节 ==")
     _, blk_orig = req("GET", "/api/image/blocks/1820")
@@ -200,6 +210,38 @@ def main() -> int:
     off1 = b1["start_block"] * 4096
     check("下载内容中 A 区间 == 备份数据",
           image[off1:off1 + len(data1)] == data1)
+
+    print("\n== F. 按块跳过：相同块不写回、不记日志 ==")
+    # A 区间已回填；用完全相同的备份段再提交一次，应 0 改写、全部跳过
+    s, lease_g = req_json("POST", "/api/leases",
+                          {"start_block": b1["start_block"],
+                           "block_count": b1["block_count"], "ttl_seconds": 30})
+    check("重领已回填区间的租约", s == 201)
+    s, body = req("PUT", f"/api/leases/{lease_g['id']}/data", data1)
+    check("重复提交相同段仍返回 200", s == 200, f"HTTP {s}")
+    stats = json.loads(body)
+    check("全部块被跳过（blocks_written == 0）",
+          stats.get("blocks_written") == 0
+          and stats.get("blocks_skipped") == b1["block_count"]
+          and stats.get("blocks_compared") == b1["block_count"],
+          f"比对 {stats.get('blocks_compared')} 写 {stats.get('blocks_written')} "
+          f"跳 {stats.get('blocks_skipped')}")
+    _, blk = req("GET", f"/api/image/blocks/{b1['start_block']}")
+    check("跳过后镜像内容不变", blk == data1[:4096])
+
+    # 只改备份段中的 1 个块再提交：非相邻差异也应一次提交，其余块跳过
+    mixed = bytearray(data1)
+    mixed[4096:2 * 4096] = b"\x5a" * 4096  # 仅第 2 块不同
+    s, lease_h = req_json("POST", "/api/leases",
+                          {"start_block": b1["start_block"],
+                           "block_count": b1["block_count"], "ttl_seconds": 30})
+    s, body = req("PUT", f"/api/leases/{lease_h['id']}/data", bytes(mixed))
+    check("单块差异的稀疏提交返回 200", s == 200, f"HTTP {s}")
+    stats = json.loads(body)
+    check("仅 1 块改写、其余全部跳过",
+          stats.get("blocks_written") == 1
+          and stats.get("blocks_skipped") == b1["block_count"] - 1,
+          f"写 {stats.get('blocks_written')} / 跳 {stats.get('blocks_skipped')}")
 
     print()
     if FAILURES:

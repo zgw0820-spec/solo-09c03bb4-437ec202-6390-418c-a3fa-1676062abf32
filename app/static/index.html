@@ -53,6 +53,7 @@
 
 <section>
   <h2>① 服务器上的备份段（样例盘出厂自带 3 段"待回填"区间）</h2>
+  <div class="muted" style="margin-bottom:8px">提交时逐块（4 KiB）与当前盘面比对：相同块跳过（不写镜像、不记回滚日志），仅改写差异块；提交结果会显示改写/跳过块数。</div>
   <div class="row">
     <label>租约 TTL <input type="number" id="ttl" value="60" min="1" max="3600"> 秒</label>
     <label>慢速上传 <input type="number" id="delay" value="0" min="0" max="2000"> ms / 64 KiB</label>
@@ -240,9 +241,15 @@ function makeCard(lease, presetLabel) {
 
 function handleUploadResult(card, lease, res) {
   if (res.status === 200) {
-    card.status.textContent = '✅ 已提交，整段生效';
+    const d = res.data || {};
+    const hasStats = d.blocks_compared !== undefined;
+    const stats = hasStats
+      ? `（比对 ${d.blocks_compared} 块 · 改写 <b>${d.blocks_written}</b> 块 · 跳过相同 <b>${d.blocks_skipped}</b> 块）`
+      : '';
+    card.status.innerHTML = `✅ 已提交${d.blocks_written === 0 ? '，全部块与当前盘面相同，无需改写' : ''} ${stats}`;
     card.status.className = 'st ok';
-    log(`租约 ${lease.id.slice(0,8)} 提交成功：[${lease.start_block}, ${lease.end_block}) 已回填`);
+    log(`租约 ${lease.id.slice(0,8)} 提交成功：[${lease.start_block}, ${lease.end_block})` +
+        (hasStats ? `，改写 ${d.blocks_written} 块，跳过相同块 ${d.blocks_skipped} 个` : ' 已回填'));
   } else {
     const msg = res.data && res.data.detail ? res.data.detail : `HTTP ${res.status}`;
     card.status.textContent = `❌ ${msg}`;

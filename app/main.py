@@ -7,7 +7,8 @@ GET    /api/info                      镜像信息（大小/块数/块大小/默
 GET    /api/leases                    租约列表
 POST   /api/leases                    领取租约 {start_block, block_count, ttl_seconds?}
 DELETE /api/leases/{id}               释放租约
-PUT    /api/leases/{id}/data          上传与区间等长的备份数据并整段提交
+PUT    /api/leases/{id}/data          上传与区间等长的完整备份段；按 4 KiB 比对，
+                                      相同块跳过、差异块稀疏提交，返回改写/跳过块数
 GET    /api/image/blocks/{index}      按块回读镜像（4 KiB）
 GET    /api/image/download            下载整个 Raw 镜像
 GET    /api/backups                   服务器上的演示备份段清单
@@ -96,8 +97,12 @@ def create_app(
 
     @app.put("/api/leases/{lease_id}/data")
     async def upload_data(lease_id: str, request: Request) -> dict:
-        lease = await manager.upload_and_commit(lease_id, request)
-        return {"status": "committed", **lease.public(time.time())}
+        lease, stats = await manager.upload_and_commit(lease_id, request)
+        return {
+            "status": "committed",
+            **stats.public(),
+            **lease.public(time.time()),
+        }
 
     # ---------- 镜像读取 ----------
 
